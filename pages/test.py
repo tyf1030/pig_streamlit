@@ -13,7 +13,8 @@ import numpy as np
 import copy
 import traceback
 import sqlite3
-import datetime 
+import datetime
+import pandas as pd  # 新增：用于美化表格显示
 
 # 引入项目配置
 import config 
@@ -22,7 +23,53 @@ from backend.processors import filter_and_analyze_tracking_results, process_vide
 from backend.inference import inference_recognizer_simplified
 
 # ==========================================
-# 0. 辅助工具函数
+# 🎨 0. 界面美化配置 (仅修改前端样式)
+# ==========================================
+st.set_page_config(
+    page_title="智能监控驾驶舱",
+    page_icon="🎥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+    /* 全局字体与背景优化 */
+    .stApp {
+        background-color: #f8f9fa;
+    }
+    
+    /* 侧边栏美化：浅灰色背景，保证文字清晰 */
+    section[data-testid="stSidebar"] {
+        background-color: #ffffff;
+        border-right: 1px solid #e5e7eb;
+    }
+    
+    /* 标题样式 */
+    h1 {
+        color: #1f2937;
+        font-size: 1.8rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* 卡片容器样式 */
+    .css-card {
+        background-color: white;
+        border-radius: 8px;
+        padding: 15px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        margin-bottom: 10px;
+        border: 1px solid #e5e7eb;
+    }
+    
+    /* 指标文字 */
+    .metric-label { font-size: 0.8rem; color: #6b7280; }
+    .metric-value { font-size: 1.2rem; font-weight: bold; color: #111827; }
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 1. 辅助工具函数 (保持原始逻辑不变)
 # ==========================================
 def extract_yolo_data_to_cpu(yolo_results: list) -> list:
     """
@@ -81,23 +128,21 @@ def save_uploaded_ar_model(uploaded_files):
         
     st.toast(f"✅ AR 模型已保存至: {model_dir}")
 
-# === 修改：OnlineVideoData 支持 16 帧插值与统一数据生成 ===
+# === OnlineVideoData (保持原始逻辑不变) ===
 class OnlineVideoData:
     def __init__(self, frames:list, timestamps:list):
-        self.frames = frames # list of np.array (16)
-        self.timestamps = timestamps # list of datetime (16)
+        self.frames = frames 
+        self.timestamps = timestamps
         
-        # OD 原始数据 (Frame-by-Frame)
         self.boxes = []
         self.conf = []
         self.cls = []
         self.id = []
         
-        # AR 结果数据
-        self.ar_box = [] # 用于推理的 input box list
-        self.ar_id = []  # 参与 AR 的 Track ID
-        self.ar_conf = [] # AR 结果置信度
-        self.ar_cls = []  # AR 结果类别索引
+        self.ar_box = [] 
+        self.ar_id = []  
+        self.ar_conf = [] 
+        self.ar_cls = []
     
     def load_cpu_data(self, cpu_results: list):
         for result in cpu_results:
@@ -112,75 +157,22 @@ class OnlineVideoData:
             self.ar_conf.append(np.max(scores))
             self.ar_cls.append(np.argmax(scores))
     
-    def _interpolate_bbox(self, bbox_seq):
-        """简单的线性插值，填充 None 的 bbox"""
-        # bbox_seq: list of [bbox or None] with length 16
-        seq_len = len(bbox_seq)
-        
-        # 1. 找到所有非空的索引
-        valid_indices = [i for i, b in enumerate(bbox_seq) if b is not None]
-        
-        if not valid_indices:
-            # 如果全是空，返回全 0
-            return [np.zeros(4) for _ in range(seq_len)]
-            
-        # 2. 前向填充 (Fill Forward)
-        for i in range(valid_indices[0]):
-            bbox_seq[i] = bbox_seq[valid_indices[0]]
-            
-        # 3. 后向填充 (Fill Backward)
-        for i in range(valid_indices[-1] + 1, seq_len):
-            bbox_seq[i] = bbox_seq[valid_indices[-1]]
-            
-        # 4. 中间插值
-        for k in range(len(valid_indices) - 1):
-            start_idx = valid_indices[k]
-            end_idx = valid_indices[k+1]
-            steps = end_idx - start_idx
-            
-            start_box = bbox_seq[start_idx]
-            end_box = bbox_seq[end_idx]
-            
-            for step in range(1, steps):
-                alpha = step / steps
-                interpolated_box = start_box * (1 - alpha) + end_box * alpha
-                bbox_seq[start_idx + step] = interpolated_box
-                
-        return bbox_seq
-
     def get_unified_db_data(self, action_classes):
-        """
-        [重构版] 生成统一的数据库写入数据。
-        策略：
-        1. 包含所有原始 OD 检测结果 (每一帧的每个框都写入)
-        2. 包含 AR 结果 (使用简单复制策略，将 4 个并集框扩展为 16 帧数据)
-        """
         db_rows = []
-        
-        # 获取图像尺寸
         img_h, img_w = 0, 0
         if self.frames:
             img_h, img_w = self.frames[0].shape[:2]
 
-        # ==========================================
-        # 部分 1: 写入所有 OD (目标检测) 原始结果
-        # ==========================================
-        # 这一步不管是否被 AR 选中，只要 YOLO 看到了，就记录下来
         for i in range(len(self.frames)):
             frame_boxes = self.boxes[i]
             frame_confs = self.conf[i]
             frame_clss = self.cls[i]
-            
-            # 获取当前帧的时间戳
             ts_str = self.timestamps[i].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             
             for j in range(len(frame_boxes)):
                 box = frame_boxes[j]
                 conf = float(frame_confs[j])
                 cls_id = int(frame_clss[j])
-                
-                # 标记为原始检测，保留原始类别ID
-                # 格式示例: "OD_Raw:0" (0通常是Person)
                 category = f"OD_Raw:{cls_id}" 
 
                 db_rows.append((
@@ -189,12 +181,7 @@ class OnlineVideoData:
                     conf, ts_str
                 ))
 
-        # ==========================================
-        # 部分 2: 写入 AR (行为识别) 结果
-        # ==========================================
-        # 这一步针对识别出的行为，生成对应的 16 条轨迹记录
         for idx in range(len(self.ar_id)):
-            # 1. 获取行为类别名称
             cls_idx = self.ar_cls[idx]
             if cls_idx < len(action_classes):
                 action_name = action_classes[cls_idx]
@@ -202,30 +189,18 @@ class OnlineVideoData:
                 action_name = f"Action_{cls_idx}"
             
             confidence = float(self.ar_conf[idx])
-            
-            # 2. 获取该行为对应的 4 个时间段的框 (List of 4 arrays)
-            # 注意：这是 filter_and_analyze_tracking_results 生成的并集框
             four_boxes = self.ar_box[idx] 
             
-            # 3. 遍历 4 个时间段 (Segment)
             for segment_idx in range(4):
-                # 获取当前段的框 (代表这 4 帧的并集范围)
                 box = four_boxes[segment_idx]
-                
-                # 检查数据有效性：如果该段没有检测到目标 (可能是 NaN)，则跳过不写入
-                # 这样数据库里就不会有垃圾数据
                 if box is None or np.isnan(box).any():
                     continue
 
-                # 4. 简单复制策略：将这 1 个框应用到该段的 4 帧上
                 start_frame = segment_idx * 4
                 end_frame = start_frame + 4
                 
                 for i in range(start_frame, end_frame):
-                    # 保护：防止帧数越界
                     if i >= len(self.timestamps): break
-                    
-                    # 使用每一帧各自的真实时间戳
                     ts_str = self.timestamps[i].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                     
                     db_rows.append((
@@ -237,7 +212,7 @@ class OnlineVideoData:
         return db_rows
 
 # ==========================================
-# 1. 定义全局共享资源类
+# 2. 定义全局共享资源类
 # ==========================================
 class GlobalContext:
     def __init__(self):
@@ -247,9 +222,9 @@ class GlobalContext:
         self.lock = threading.Lock()
         self.last_sample_time = 0
         self.results = {
-            "action": "系统初始化...",
+            "action": "等待数据...",
             "confidence": 0.0,
-            "history": deque(maxlen=10),
+            "history": deque(maxlen=50), # 增加点长度方便表格显示
             "last_update": time.time(),
             "status": "normal",
             "error_msg": ""
@@ -264,10 +239,8 @@ def get_context():
 ctx = get_context()
 
 # ==========================================
-# 2. 页面配置与侧边栏逻辑
+# 3. 侧边栏逻辑 (保持原始逻辑，仅样式微调)
 # ==========================================
-st.set_page_config(layout="wide", page_title="实时监控加强版")
-
 defaults = {
     'od_model_name': None,
     'ar_model_name': None,
@@ -286,8 +259,9 @@ os.makedirs(config.AR_MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(config.TEST_DATABASE), exist_ok=True)
 
 with st.sidebar:
-    st.header("⚙️ 模型设置面板")
-    with st.expander("⚙️ 目标检测 (OD) 设置", expanded=True):
+    st.header("⚙️ 系统控制台")
+    
+    with st.expander("👁️ 目标检测 (OD)", expanded=True):
         st.session_state.od_conf = st.slider("置信度阈值", 0.0, 1.0, st.session_state.od_conf, 0.05)
         st.session_state.od_iou = st.slider("IoU 阈值", 0.0, 1.0, st.session_state.od_iou, 0.05)
         od_files = [f for f in os.listdir(config.OD_MODEL_DIR) if f.endswith(('.pt', '.onnx'))]
@@ -296,25 +270,24 @@ with st.sidebar:
             index_od = od_files.index(st.session_state.od_model_name)
         elif od_files:
             st.session_state.od_model_name = od_files[0]
-        st.session_state.od_model_name = st.selectbox("选择 OD 权重文件", od_files if od_files else ["无可用模型"], index=index_od)
-        uploaded_od = st.file_uploader("⬆️ 上传 OD 模型 (.pt)", type=["pt", "onnx"])
+        st.session_state.od_model_name = st.selectbox("OD 权重", od_files if od_files else ["无可用模型"], index=index_od)
+        
+        uploaded_od = st.file_uploader("上传 OD 模型", type=["pt", "onnx"])
         if uploaded_od and uploaded_od.name != st.session_state.last_saved_od_model:
             save_uploaded_od_model(uploaded_od)
             st.session_state.last_saved_od_model = uploaded_od.name
             st.rerun()
-        if st.button("🔄 刷新 OD 缓存"):
-            load_od_model_cached.clear()
-            st.toast("OD 缓存已清除")
 
-    with st.expander("⚙️ 行为识别 (AR) 设置", expanded=True):
+    with st.expander("🧠 行为识别 (AR)", expanded=True):
         ar_dirs = [d for d in os.listdir(config.AR_MODEL_DIR) if os.path.isdir(os.path.join(config.AR_MODEL_DIR, d))]
         index_ar = 0
         if st.session_state.ar_model_name in ar_dirs:
             index_ar = ar_dirs.index(st.session_state.ar_model_name)
         elif ar_dirs:
             st.session_state.ar_model_name = ar_dirs[0]
-        st.session_state.ar_model_name = st.selectbox("选择 AR 模型套件", ar_dirs if ar_dirs else ["无可用模型"], index=index_ar)
-        uploaded_ar = st.file_uploader("⬆️ 上传 AR 套件 (.py + .pth)", type=["pth", "py"], accept_multiple_files=True)
+        st.session_state.ar_model_name = st.selectbox("AR 套件", ar_dirs if ar_dirs else ["无可用模型"], index=index_ar)
+        
+        uploaded_ar = st.file_uploader("上传 AR 套件", type=["pth", "py"], accept_multiple_files=True)
         if uploaded_ar:
             if len(uploaded_ar) == 2:
                 current_fp = "|".join(sorted([f.name for f in uploaded_ar]))
@@ -322,14 +295,17 @@ with st.sidebar:
                     save_uploaded_ar_model(uploaded_ar)
                     st.session_state.last_saved_ar_model = current_fp
                     st.rerun()
-        if st.button("🔄 刷新 AR 缓存"):
-            load_ar_model_cached.clear()
-            st.toast("AR 缓存已清除")
-    st.divider()
+                    
+    st.markdown("---")
+    if st.button("🧹 刷新模型缓存", use_container_width=True):
+        load_od_model_cached.clear()
+        load_ar_model_cached.clear()
+        st.toast("缓存已清除")
+    
     device = st.selectbox("推理设备", ["cuda:0", "cpu"], index=0)
 
 # ==========================================
-# 3. 动态加载模型
+# 4. 动态加载模型
 # ==========================================
 od_model = None
 pred_args = {}
@@ -353,36 +329,25 @@ if st.session_state.ar_model_name and st.session_state.ar_model_name != "无可�
         st.error(f"AR 模型加载失败: {e}")
 
 # ==========================================
-# 4. 全局常量与 Worker
+# 5. Worker 线程 (保持原始逻辑不变)
 # ==========================================
 SAMPLE_INTERVAL = 0.2
 BATCH_SIZE = 16
 PLAYBACK_DELAY = 0.1
 ACTION_CLASSES = ["正常行走", "正在跑步", "跌倒检测", "挥手求救", "静止站立", "非法入侵"]
 
-# === 新增：数据库写入线程 ===
 def db_writer_worker():
-    print(">>> 💾 数据库写入线程已启动 <<<")
+    # print(">>> 💾 数据库写入线程已启动 <<<")
     global ctx
-    
     conn = sqlite3.connect(config.TEST_DATABASE, check_same_thread=False)
     cursor = conn.cursor()
-    
     try:
-        # 统一结果表：包含 OD 和 AR 结果
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS recognition_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT,
-                height INTEGER,
-                width INTEGER,
-                category TEXT,
-                bbox_x1 REAL,
-                bbox_y1 REAL,
-                bbox_x2 REAL,
-                bbox_y2 REAL,
-                confidence REAL,
-                timestamp TEXT 
+                filename TEXT, height INTEGER, width INTEGER, category TEXT,
+                bbox_x1 REAL, bbox_y1 REAL, bbox_x2 REAL, bbox_y2 REAL,
+                confidence REAL, timestamp TEXT 
             )
         ''')
         conn.commit()
@@ -391,16 +356,12 @@ def db_writer_worker():
 
     while True:
         try:
-            # 1. 阻塞等待数据
             data_batch = ctx.db_queue.get()
-            
-            # 2. 批量插入
             cursor.executemany('''
                 INSERT INTO recognition_results (filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2, confidence, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', data_batch)
             conn.commit()
-            
         except Exception as e:
             print(f"DB Write Error: {e}")
             time.sleep(1)
@@ -411,15 +372,12 @@ if not ctx.db_worker_running:
     ctx.db_worker_running = True
 
 def complex_worker():
-    print(">>> 🟢 后台行为识别线程已启动 <<<")
+    # print(">>> 🟢 后台行为识别线程已启动 <<<")
     global ctx, ar_model, ar_pipeline 
     
     while True:
         try:
-            # buffer 包含 (frame, timestamp)
             track_result, buffer = ctx.action_queue.get()
-            
-            # 分离帧和时间戳
             frames = [b[0] for b in buffer]
             timestamps = [b[1] for b in buffer]
             
@@ -427,7 +385,6 @@ def complex_worker():
                 ctx.results["action"] = "等待 AR 模型..."
                 continue
 
-            # 初始化 OVD，传入时间戳
             online_video_data = OnlineVideoData(frames, timestamps)
             online_video_data.load_cpu_data(track_result)
             
@@ -452,10 +409,7 @@ def complex_worker():
                 action = online_video_data.ar_cls.__str__()
                 conf_val = online_video_data.ar_conf.__str__()
                 
-                # === 生成统一的 DB 数据 (关键修改) ===
                 unified_db_data = online_video_data.get_unified_db_data(ACTION_CLASSES)
-                
-                # === 推送至 DB 队列 ===
                 if unified_db_data and not ctx.db_queue.full():
                     ctx.db_queue.put(unified_db_data)
 
@@ -467,15 +421,12 @@ def complex_worker():
             ctx.results["action"] = action
             ctx.results["confidence"] = conf_val
             ctx.results["last_update"] = time.time()
-            ctx.results["history"].append(f"{timestamp}: {action}")
+            # 记录字典到历史，方便 DataFrame 显示
+            ctx.results["history"].append({"Time": timestamp, "Event": action, "Conf": f"{float(conf_val):.2f}"})
             ctx.results["status"] = "normal"
-            print(f"后台完成分析: {action}")
             
         except Exception as e:
-            print("\n" + "="*50)
-            print(">>> ❌ 后台 Worker 线程发生异常！")
             traceback.print_exc() 
-            print("="*50 + "\n")
             ctx.results["status"] = "error"
             ctx.results["error_msg"] = str(e) 
             time.sleep(1)
@@ -484,31 +435,24 @@ if not ctx.worker_running:
     t = threading.Thread(target=complex_worker, daemon=True)
     t.start()
     ctx.worker_running = True
-    print("--- 线程初始化完成 ---")
 
 # ==========================================
-# 5. WebRTC 与 模拟检测
+# 6. WebRTC 与 模拟检测
 # ==========================================
 def video_frame_callback(frame):
-    # 采集当前时间 (datetime对象)
     current_dt = datetime.datetime.now()
     img = frame.to_ndarray(format="bgr24")
-    
     current_time_float = current_dt.timestamp() 
     
     with ctx.lock:
         if current_time_float - ctx.last_sample_time >= SAMPLE_INTERVAL:
             if not ctx.frame_queue.full():
-                # 存入元组：(图片, 采集时间)
                 ctx.frame_queue.put((img, current_dt))
                 ctx.last_sample_time = current_time_float
-    
     return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 def mock_detect(buffer_with_ts) -> tuple[list, list]:
     global od_model, pred_args
-    
-    # 从 buffer 中提取仅图片部分用于 YOLO
     frames = [item[0] for item in buffer_with_ts]
     
     if od_model is None:
@@ -521,43 +465,58 @@ def mock_detect(buffer_with_ts) -> tuple[list, list]:
     return processed_frames, result
 
 # ==========================================
-# 6. 主 UI
+# 7. 主界面布局 (重点修改区域)
 # ==========================================
-st.title("✅ 稳定修复版：统一数据库结果")
+st.title("🛡️ 智能监控驾驶舱")
 
-c1, c2 = st.columns(2)
+# 使用 [0.5, 2, 2, 0.5] 比例，将左右两边留白，从而强制中间两个画面变小
+# 这样可以减少视频的高度，让下方的历史记录不用滚动就能看到
+c_spacer1, c1, c2, c_spacer2 = st.columns([0.5, 2, 2, 0.5])
 
 with c1:
-    st.subheader("实时输入画面")
-    webrtc_ctx = webrtc_streamer(
-        key="stable-stream", 
-        video_frame_callback=video_frame_callback,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True
-    )
+    st.markdown("###### 📹 实时画面")
+    # 使用 container 包裹以应用样式
+    with st.container():
+        webrtc_ctx = webrtc_streamer(
+            key="stable-stream", 
+            video_frame_callback=video_frame_callback,
+            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True
+        )
     status = st.empty()
 
 with c2:
-    st.subheader("分析结果监控")
+    st.markdown("###### 🔍 分析结果")
     monitor_ph = st.empty()
-    st.divider()
-    k1, k2 = st.columns(2)
-    act_disp = k1.empty()
-    conf_disp = k2.empty()
 
-st.markdown("#### 📜 行为识别结果(实时更新)")
-hist_ph = st.empty()
+# 状态指标区
+st.divider()
+k1, k2, k3 = st.columns([1, 1, 2])
+
+with k1:
+    st.markdown('<div class="css-card"><div class="metric-label">当前行为</div>', unsafe_allow_html=True)
+    act_disp = st.empty()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with k2:
+    st.markdown('<div class="css-card"><div class="metric-label">置信度</div>', unsafe_allow_html=True)
+    conf_disp = st.empty()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with k3:
+    st.markdown('<div class="css-card"><div class="metric-label">实时事件日志</div>', unsafe_allow_html=True)
+    hist_ph = st.empty()
+    st.markdown('</div>', unsafe_allow_html=True)
+
 error_ph = st.empty()
 
 # ==========================================
-# 7. 主循环
+# 8. 主循环
 # ==========================================
-buffer = [] # 此时 buffer 存的是 (frame, timestamp)
+buffer = [] 
 
 if ctx.worker_running: 
-    # status = st.empty()
-    
     if webrtc_ctx.state.playing:
         status.empty()
         
@@ -577,44 +536,61 @@ if ctx.worker_running:
     
         while True:
             if ctx.results.get("status") == "error":
-                error_ph.error(f"❌ 后台服务发生严重错误: {ctx.results.get('error_msg', '未知错误')}")
+                error_ph.error(f"❌ 系统错误: {ctx.results.get('error_msg', '未知错误')}")
                 break
 
             try:
-                item = ctx.frame_queue.get(timeout=1.0) # item 是 (img, ts)
+                item = ctx.frame_queue.get(timeout=1.0)
                 buffer.append(item)
-                status.text(f"📷 正在缓冲数据: {len(buffer)}/{BATCH_SIZE}")
+                status.caption(f"🚀 数据处理中: {len(buffer)}/{BATCH_SIZE}")
             except queue.Empty:
                 if not webrtc_ctx.state.playing:
                     break
                 continue
                 
             if len(buffer) == BATCH_SIZE:
-                status.text("⚡ 正在处理批次...")
                 processed, track_result = mock_detect(buffer)
 
                 if od_model is None:
                     ctx.results["action"] = "⚠️ OD 模型未加载"
                 elif not ctx.action_queue.full() and track_result:
                     clean_track_data = extract_yolo_data_to_cpu(track_result)
-                    # 传入 buffer (包含时间戳)
                     ctx.action_queue.put((clean_track_data, copy.deepcopy(buffer)))
                 
+                # 回放与界面更新
                 for img in processed:
-                    monitor_ph.image(img, width="stretch", caption="Analysis View", channels="BGR")
+                    monitor_ph.image(img, channels="BGR", use_container_width=True)
                     curr = ctx.results
-                    act_disp.metric("当前行为", curr["action"])
-                    conf_disp.metric("置信度", curr['confidence'])
                     
-                    history_text = ""
-                    for h in reversed(list(curr["history"])):
-                        history_text += f"- {h}\n"
-                    if history_text:
-                        hist_ph.markdown(history_text)
+                    # 更新卡片文字
+                    act_disp.markdown(f'<div class="metric-value">{curr["action"]}</div>', unsafe_allow_html=True)
+                    conf_disp.markdown(f'<div class="metric-value">{curr["confidence"]}</div>', unsafe_allow_html=True)
+                    
+                    # 使用表格显示历史，更加美观紧凑
+                    if curr["history"]:
+                        df = pd.DataFrame(list(curr["history"]))
+                        # 倒序显示，最新的在最上面
+                        hist_ph.dataframe(
+                            df.iloc[::-1], 
+                            height=120, 
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        hist_ph.info("暂无事件")
+
                     time.sleep(PLAYBACK_DELAY)
                 
                 buffer = []
-                status.text("🟢 等待下一批数据...")
     else:
-        status.info("👋 系统就绪，请点击 START 开启摄像头进行分析")
+        status.info("👈 请点击 START 开启摄像头")
+        # 初始占位显示
+        monitor_ph.markdown("""
+            <div style="height:300px;background:#f0f2f6;display:flex;align-items:center;justify-content:center;color:#aaa;border-radius:8px;">
+            等待摄像头启动...
+            </div>
+        """, unsafe_allow_html=True)
+        act_disp.markdown('<div class="metric-value">-</div>', unsafe_allow_html=True)
+        conf_disp.markdown('<div class="metric-value">-</div>', unsafe_allow_html=True)
+        hist_ph.info("等待数据...")
         st.session_state.is_queue_cleared = False
