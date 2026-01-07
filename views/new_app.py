@@ -30,6 +30,8 @@ except ImportError as e:
     st.error(f"❌ 后端库导入失败: {e}")
     st.stop()
 
+logger = logging.getLogger("Views.VideoAnalyzer")
+
 # --- 页面配置 ---
 st.set_page_config(
     page_title="猪只行为识别系统 Pro",
@@ -101,6 +103,7 @@ def save_uploaded_od_model(uploaded_file):
     save_path = os.path.join(config.OD_MODEL_DIR, uploaded_file.name)
     with open(save_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
+    logger.info(f"OD 模型已保存: {uploaded_file.name}")
     st.toast(f"✅ OD 模型已保存: {uploaded_file.name}")
 
 def save_uploaded_ar_model(uploaded_files):
@@ -111,6 +114,7 @@ def save_uploaded_ar_model(uploaded_files):
     pth_file = next((f for f in uploaded_files if f.name.endswith('.pth')), None)
     
     if not py_file or not pth_file:
+        loffer.error("上传文件格式错误") 
         st.error("❌ 必须要同时上传 .py 和 .pth 文件")
         return
 
@@ -119,6 +123,7 @@ def save_uploaded_ar_model(uploaded_files):
     pth_name = os.path.splitext(pth_file.name)[0]
     
     if py_name != pth_name:
+        logger.error(f"文件名不一致: {py_name}.py vs {pth_name}.pth")
         st.error(f"❌ 文件名不一致: {py_name}.py vs {pth_name}.pth")
         return
 
@@ -131,7 +136,8 @@ def save_uploaded_ar_model(uploaded_files):
         f.write(py_file.getbuffer())
     with open(os.path.join(model_dir, pth_file.name), "wb") as f:
         f.write(pth_file.getbuffer())
-        
+
+    logger.info(f"AR 模型已保存: {py_file.name}")
     st.toast(f"✅ AR 模型已保存至: {model_dir}")
 
 # --- 核心任务逻辑 ---
@@ -139,6 +145,8 @@ def run_analysis_pipeline(conf, iou, device):
     """执行完整的视频分析流程"""
     status = st.empty()
     bar = st.progress(0)
+    video_name = os.path.basename(st.session_state.video_path)
+    logger.info(f"启动分析任务: 视频={video_name}, OD模型={st.session_state.od_model_name}, AR模型={st.session_state.ar_model_name}, 设备={device}")
     
     try:
         # 1. 准备模型
@@ -221,6 +229,9 @@ def run_analysis_pipeline(conf, iou, device):
             )
             plotted_result.add_res(plotted_imgs, video_data.anno)
             
+            if segment_count % 5 == 0:
+                logger.info(f"已处理片段: {segment_count}")
+
             segment_count += 1
             if reader.total_frames > 0:
                 p = min(segment_count * 16 / reader.total_frames, 0.95)
@@ -241,11 +252,13 @@ def run_analysis_pipeline(conf, iou, device):
         st.session_state.output_video_path = final_video
         st.session_state.result_dir = res_dir
         
+        logger.info(f"分析任务成功完成: 共处理 {segment_count} 个片段，生成视频: {final_video}")
         bar.progress(1.0)
         status.success("✅ 分析完成！")
         return True
         
     except Exception as e:
+        logger.error("分析流程发生严重错误", exc_info=True)
         status.error("❌ 处理中断")
         st.error(f"详细错误: {str(e)}")
         import traceback
@@ -254,6 +267,7 @@ def run_analysis_pipeline(conf, iou, device):
 
 # --- 侧边栏：还原 Gradio 布局 ---
 with st.sidebar:
+    st.write(f"当前用户: {st.session_state.user_info['username']}")
     st.header("⚙️ 设置面板")
     
     # 1. 目标检测参数设置
@@ -286,6 +300,7 @@ with st.sidebar:
 
         if st.button("🔄 重新加载 OD 模型"):
             load_od_model_cached.clear()
+            logger.info("已重新加载 OD 模型")
             st.toast("已清除缓存")
 
     # 2. 行为识别参数设置
@@ -322,6 +337,7 @@ with st.sidebar:
                 st.warning("⚠️ 请只上传 2 个文件（.py 和 .pth）")
 
         if st.button("🔄 重新加载 AR 模型"):
+            logger.info("已重新加载 AR 模型")
             load_ar_model_cached.clear()
             st.toast("已清除缓存")
             
@@ -352,6 +368,7 @@ with col1:
     with upload_container:
         # 检查 FFmpeg
         if not check_ffmpeg_installed():
+            logger.error("未检测到 FFmpeg")
             st.error("🚨 未检测到 FFmpeg！")
             st.stop()
         
@@ -362,6 +379,7 @@ with col1:
 
         # 处理上传文件逻辑
         if uploaded_file:
+            logger.info(f"上传新视频文件: {uploaded_file.name}, 大小: {uploaded_file.size/1024/1024:.2f}MB")
             file_fingerprint = f"{uploaded_file.name}_{uploaded_file.size}"
             
             # 只有当指纹变化时才处理
@@ -390,10 +408,11 @@ with col1:
                     st.session_state.result_dir = None
                     
                     progress_toast.toast("✅ 视频预处理完成", icon="✅")
-                    time.sleep(1)
+                    logger.info("已处理新视频")
                     st.rerun()
                 else:
-                    st.error(f"❌ 转码失败: {msg}")
+                    logger.error(f"转码失败: {msg}")
+                    st.error(f"转码失败: {msg}")
                     # 允许重试
                     if 'current_file_fingerprint' in st.session_state:
                         del st.session_state.current_file_fingerprint
@@ -447,12 +466,15 @@ with col2:
     # 2. 处理点击事件 (在 status_container 中显示进度)
     if start_btn:
         with status_container:
+            logger.info("开始分析")
             success = run_analysis_pipeline(conf, iou, device)
             if success and save_db:
                 try:
                     get_res_to_sqlite(st.session_state.processing_result, config.VIDEO_RECOGNITION_DATABASE)
                     st.toast("💾 数据库已更新")
+                    logger.info(f"分析结果已存入数据库: {config.VIDEO_RECOGNITION_DATABASE}")
                 except Exception as e:
+                    logger.info(f"数据库错误: {e}")
                     st.error(f"数据库错误: {e}")
             if success:
                 st.rerun() # 刷新以显示结果
@@ -484,7 +506,8 @@ with col2:
                     f, 
                     file_name="result.mp4", 
                     mime="video/mp4",
-                    use_container_width=True
+                    use_container_width=True,
+                    on_click=lambda: logger.info(f"用户下载了分析结果视频: {st.session_state.output_video_path}")
                 )
             
             # 按钮 2: JSON
@@ -497,13 +520,15 @@ with col2:
                             f, 
                             file_name="annotations.json", 
                             mime="application/json",
-                            use_container_width=True
+                            use_container_width=True,
+                            on_click=lambda: logger.info(f"用户下载了分析结果JSON: {json_path}")
                         )
             
             # 按钮 3: ZIP
             # 注意：如果 ZIP 生成较慢，可以采用 if button -> generate -> show download 的逻辑
             # 这里为了布局对齐，直接使用 button 触发生成和下载
             if dc3.button("🖼️ 打包图片", use_container_width=True):
+                logger.info("用户点击[打包图片]，开始生成ZIP文件...")
                 with st.spinner("正在打包关键帧..."):
                     try:
                         zip_path = get_annotated_images_zipfile(
@@ -512,6 +537,8 @@ with col2:
                             video_name=st.session_state.processing_result.video_name,
                             sample_step=1
                         )
+                        file_size = os.path.getsize(zip_path) / (1024 * 1024)
+                        logger.info(f"ZIP打包成功: {zip_path} (大小: {file_size:.2f} MB)")
                         with open(zip_path, "rb") as f:
                             # 模拟点击下载
                             st.download_button(
@@ -520,9 +547,11 @@ with col2:
                                 file_name="frames.zip", 
                                 mime="application/zip",
                                 key="real_zip_download",
-                                use_container_width=True
+                                use_container_width=True,
+                                on_click=lambda: logger.info(f"用户下载了关键帧ZIP: {zip_path}")
                             )
                     except Exception as e:
+                        logger.info(f"打包失败: {e}", exc_info=True)
                         st.error(f"打包失败: {e}")
         else:
             # 如果没有结果，显示禁用的灰色按钮占位，保持布局美观

@@ -20,7 +20,7 @@ import config
 from utils.model_loader import load_ar_model_cached, load_od_model_cached
 from backend.processors import filter_and_analyze_tracking_results, process_video_regions
 from backend.inference import inference_recognizer_simplified
-
+import logging
 # ==========================================
 # 0. 辅助工具函数
 # ==========================================
@@ -54,6 +54,7 @@ def save_uploaded_od_model(uploaded_file):
     save_path = os.path.join(config.OD_MODEL_DIR, uploaded_file.name)
     with open(save_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
+    logger.info(f"✅ OD 模型已保存: {uploaded_file.name}")
     st.toast(f"✅ OD 模型已保存: {uploaded_file.name}")
 
 def save_uploaded_ar_model(uploaded_files):
@@ -62,12 +63,14 @@ def save_uploaded_ar_model(uploaded_files):
     pth_file = next((f for f in uploaded_files if f.name.endswith('.pth')), None)
     
     if not py_file or not pth_file:
+        logger.error("上传文件格式错误")
         st.error("❌ 必须要同时上传 .py 和 .pth 文件")
         return
 
     py_name = os.path.splitext(py_file.name)[0]
     pth_name = os.path.splitext(pth_file.name)[0]
     if py_name != pth_name:
+        logger.error("文件名不一致: {py_name}.py vs {pth_name}.pth")
         st.error(f"❌ 文件名不一致: {py_name}.py vs {pth_name}.pth")
         return
 
@@ -78,7 +81,8 @@ def save_uploaded_ar_model(uploaded_files):
         f.write(py_file.getbuffer())
     with open(os.path.join(model_dir, pth_file.name), "wb") as f:
         f.write(pth_file.getbuffer())
-        
+
+    logger.info(f"✅ AR 模型已保存: {uploaded_file.name}")  
     st.toast(f"✅ AR 模型已保存至: {model_dir}")
 
 # === 修改：OnlineVideoData 支持 16 帧插值与统一数据生成 ===
@@ -148,7 +152,7 @@ class OnlineVideoData:
                 
         return bbox_seq
 
-    def get_unified_db_data(self, action_classes):
+    def get_unified_db_data(self, action_classes, username):
         """
         [重构版] 生成统一的数据库写入数据。
         策略：
@@ -184,6 +188,7 @@ class OnlineVideoData:
                 category = f"OD_Raw:{cls_id}" 
 
                 db_rows.append((
+                    username,
                     "webcam_stream", img_h, img_w, category,
                     float(box[0]), float(box[1]), float(box[2]), float(box[3]),
                     conf, ts_str
@@ -229,7 +234,7 @@ class OnlineVideoData:
                     ts_str = self.timestamps[i].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                     
                     db_rows.append((
-                        "webcam_stream", img_h, img_w, action_name,
+                        username ,"webcam_stream", img_h, img_w, action_name,
                         float(box[0]), float(box[1]), float(box[2]), float(box[3]),
                         confidence, ts_str
                     ))
@@ -286,6 +291,7 @@ os.makedirs(config.AR_MODEL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(config.TEST_DATABASE), exist_ok=True)
 
 with st.sidebar:
+    st.write(f"当前用户: {st.session_state.user_info['username']}")
     st.header("⚙️ 模型设置面板")
     with st.expander("⚙️ 目标检测 (OD) 设置", expanded=True):
         st.session_state.od_conf = st.slider("置信度阈值", 0.0, 1.0, st.session_state.od_conf, 0.05)
@@ -362,6 +368,7 @@ ACTION_CLASSES = ["正常行走", "正在跑步", "跌倒检测", "挥手求救"
 
 # === 新增：数据库写入线程 ===
 def db_writer_worker():
+    logger.info("数据库写入线程启动")
     print(">>> 💾 数据库写入线程已启动 <<<")
     global ctx
     
@@ -373,6 +380,7 @@ def db_writer_worker():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS recognition_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_name TEXT,
                 filename TEXT,
                 height INTEGER,
                 width INTEGER,
@@ -387,21 +395,22 @@ def db_writer_worker():
         ''')
         conn.commit()
     except Exception as e:
+        logger.error(f"数据库初始化错误: {e}")
         print(f"DB Init Error: {e}")
 
     while True:
         try:
             # 1. 阻塞等待数据
             data_batch = ctx.db_queue.get()
-            
             # 2. 批量插入
             cursor.executemany('''
-                INSERT INTO recognition_results (filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2, confidence, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO recognition_results (user_name, filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2, confidence, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', data_batch)
             conn.commit()
             
         except Exception as e:
+            logger.error(f"数据库写入错误: {e}")
             print(f"DB Write Error: {e}")
             time.sleep(1)
 
@@ -411,13 +420,14 @@ if not ctx.db_worker_running:
     ctx.db_worker_running = True
 
 def complex_worker():
+    logger.info("后台行为识别线程启动")
     print(">>> 🟢 后台行为识别线程已启动 <<<")
     global ctx, ar_model, ar_pipeline 
     
     while True:
         try:
-            # buffer 包含 (frame, timestamp)
-            track_result, buffer = ctx.action_queue.get()
+            # buffer 包含 (frame, timestamp, username)
+            track_result, buffer, username = ctx.action_queue.get()
             
             # 分离帧和时间戳
             frames = [b[0] for b in buffer]
@@ -453,7 +463,7 @@ def complex_worker():
                 conf_val = online_video_data.ar_conf.__str__()
                 
                 # === 生成统一的 DB 数据 (关键修改) ===
-                unified_db_data = online_video_data.get_unified_db_data(ACTION_CLASSES)
+                unified_db_data = online_video_data.get_unified_db_data(ACTION_CLASSES, username)
                 
                 # === 推送至 DB 队列 ===
                 if unified_db_data and not ctx.db_queue.full():
@@ -469,10 +479,12 @@ def complex_worker():
             ctx.results["last_update"] = time.time()
             ctx.results["history"].append(f"{timestamp}: {action}")
             ctx.results["status"] = "normal"
+            logger.info(f"后台完成分析: {action}")
             print(f"后台完成分析: {action}")
             
         except Exception as e:
             print("\n" + "="*50)
+            logger.error(f"后台 Worker 线程发生异常: {e}")
             print(">>> ❌ 后台 Worker 线程发生异常！")
             traceback.print_exc() 
             print("="*50 + "\n")
@@ -484,6 +496,7 @@ if not ctx.worker_running:
     t = threading.Thread(target=complex_worker, daemon=True)
     t.start()
     ctx.worker_running = True
+    logger.info("后台行为识别线程已启动")
     print("--- 线程初始化完成 ---")
 
 # ==========================================
@@ -559,6 +572,9 @@ if ctx.worker_running:
     # status = st.empty()
     
     if webrtc_ctx.state.playing:
+        if not st.session_state.get("_stream_logging_flag"):
+            logger.info("开启摄像头")
+            st.session_state._stream_logging_flag = True
         status.empty()
         
         if not st.session_state.is_queue_cleared:
@@ -598,7 +614,8 @@ if ctx.worker_running:
                 elif not ctx.action_queue.full() and track_result:
                     clean_track_data = extract_yolo_data_to_cpu(track_result)
                     # 传入 buffer (包含时间戳)
-                    ctx.action_queue.put((clean_track_data, copy.deepcopy(buffer)))
+                    current_username = st.session_state.user_info["username"]
+                    ctx.action_queue.put((clean_track_data, copy.deepcopy(buffer), current_username))
                 
                 for img in processed:
                     monitor_ph.image(img, width="stretch", caption="Analysis View", channels="BGR")
@@ -618,3 +635,4 @@ if ctx.worker_running:
     else:
         status.info("👋 系统就绪，请点击 START 开启摄像头进行分析")
         st.session_state.is_queue_cleared = False
+        st.session_state._stream_logging_flag = False
