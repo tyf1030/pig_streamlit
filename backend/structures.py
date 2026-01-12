@@ -155,14 +155,14 @@ class VideoData:
                     {
                         "bbox": bboxes[j],
                         "id": track_ids[j],
-                        "cls": "OD: " + str(class_ids[j]),
+                        "cls": "OD:" + str(int(class_ids[j])),
                         "conf": confidences[j],
                     }
                 )
         
         if len(self.act_res.cls) > 0:
             for num in range(len(self.act_res.boxes)):
-                act_id = "AR: " + str(self.act_res.cls[num])
+                act_id = "AR:" + str(int(self.act_res.cls[num]))
                 conf = self.act_res.conf[num]
                 id = self.act_res.id[num]
                 for i in range(4):

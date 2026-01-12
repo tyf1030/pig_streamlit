@@ -11,6 +11,7 @@ from ..structures import PlottedResult
 def get_res_to_sqlite(
     result: PlottedResult,
     db_path: str,
+    user_name: str = "unknown"
 ):
 
     if not os.path.exists(db_path):
@@ -25,13 +26,14 @@ def get_res_to_sqlite(
                 CREATE TABLE IF NOT EXISTS recognition_results (
                     img_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT NOT NULL,
+                    user_name TEXT,
                     height INTEGER NOT NULL,
                     width INTEGER NOT NULL,
                     category TEXT NOT NULL,
-                    bbox_x1 REAL NOT NULL,
-                    bbox_y1 REAL NOT NULL,
-                    bbox_x2 REAL NOT NULL,
-                    bbox_y2 REAL NOT NULL,
+                    bbox_x REAL NOT NULL,
+                    bbox_y REAL NOT NULL,
+                    bbox_w REAL NOT NULL,
+                    bbox_h REAL NOT NULL,
                     confidence REAL,
                     timestamp TEXT
                 )
@@ -48,12 +50,12 @@ def get_res_to_sqlite(
             for j in result.raw_anno[i]:
                 bbox = j["bbox"]
                 # print("============" + j["conf"] + "===============")
-                bbox = [float(bbox[0]), float(bbox[1]), float(bbox[2]-bbox[0]), float(bbox[3]-bbox[1])]
-                data_to_insert.append((file_name, height, width, j["cls"], bbox[0], bbox[1], bbox[2], bbox[3], float(j["conf"]), timestamp))
+                bbox = [float(bbox[2]+bbox[0]), float(bbox[3]+bbox[1]), float(bbox[2]-bbox[0]), float(bbox[3]-bbox[1])]
+                data_to_insert.append((file_name, user_name, height, width, j["cls"], bbox[0], bbox[1], bbox[2], bbox[3], float(j["conf"]), timestamp))
         
         cursor.executemany('''
-            INSERT INTO recognition_results (filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2, confidence, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO recognition_results (filename, user_name, height, width, category, bbox_x, bbox_y, bbox_w, bbox_h, confidence, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', data_to_insert)
 
         conn.commit()

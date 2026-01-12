@@ -589,7 +589,7 @@ if start_btn:
         
         if success and save_db:
             try:
-                get_res_to_sqlite(st.session_state.processing_result, config.VIDEO_RECOGNITION_DATABASE)
+                get_res_to_sqlite(st.session_state.processing_result, config.VIDEO_RECOGNITION_DATABASE, user_name=st.session_state.user_info['username'])
                 st.toast("💾 数据库已更新")
                 logger.info(f"分析结果已存入数据库: {config.VIDEO_RECOGNITION_DATABASE}")
             except Exception as e:

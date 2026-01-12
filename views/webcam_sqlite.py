@@ -14,7 +14,7 @@ import copy
 import traceback
 import sqlite3
 import datetime 
-
+import pandas as pd
 # 引入项目配置
 import config 
 from utils.model_loader import load_ar_model_cached, load_od_model_cached
@@ -154,7 +154,7 @@ class OnlineVideoData:
                 
         return bbox_seq
 
-    def get_unified_db_data(self, action_classes, username):
+    def get_unified_db_data(self, action_classes, username, ctx, od_names=None):
         """
         [重构版] 生成统一的数据库写入数据。
         策略：
@@ -162,6 +162,7 @@ class OnlineVideoData:
         2. 包含 AR 结果 (使用简单复制策略，将 4 个并集框扩展为 16 帧数据)
         """
         db_rows = []
+        visual_status = []
         
         # 获取图像尺寸
         img_h, img_w = 0, 0
@@ -187,12 +188,15 @@ class OnlineVideoData:
                 
                 # 标记为原始检测，保留原始类别ID
                 # 格式示例: "OD_Raw:0" (0通常是Person)
-                category = f"OD_Raw:{cls_id}" 
+                category = f"OD:{cls_id}" 
+
+                # 可视化暂存
+                visual_status.append(category)
 
                 db_rows.append((
                     username,
                     "webcam_stream", img_h, img_w, category,
-                    float(box[0]), float(box[1]), float(box[2]), float(box[3]),
+                    float(box[0]+box[2]), float(box[1]+box[3]), float(box[2]-box[0]), float(box[3]-box[1]),
                     conf, ts_str
                 ))
 
@@ -202,11 +206,11 @@ class OnlineVideoData:
         # 这一步针对识别出的行为，生成对应的 16 条轨迹记录
         for idx in range(len(self.ar_id)):
             # 1. 获取行为类别名称
-            cls_idx = self.ar_cls[idx]
+            cls_idx = int(self.ar_cls[idx])
             if cls_idx < len(action_classes):
                 action_name = action_classes[cls_idx]
             else:
-                action_name = f"Action_{cls_idx}"
+                action_name = f"AR:{cls_idx}"
             
             confidence = float(self.ar_conf[idx])
             
@@ -234,13 +238,16 @@ class OnlineVideoData:
                     
                     # 使用每一帧各自的真实时间戳
                     ts_str = self.timestamps[i].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+                    visual_status.append(action_name)
                     
                     db_rows.append((
                         username ,"webcam_stream", img_h, img_w, action_name,
-                        float(box[0]), float(box[1]), float(box[2]), float(box[3]),
+                        float(box[0]+box[2]), float(box[1]+box[3]), float(box[2]-box[0]), float(box[3]-box[1]),
                         confidence, ts_str
                     ))
-                    
+        if visual_status:
+            ctx.detection_window.extend(visual_status)
         return db_rows
 
 # ==========================================
@@ -261,6 +268,7 @@ class GlobalContext:
             "status": "normal",
             "error_msg": ""
         }
+        self.detection_window = deque(maxlen=2000)
         self.worker_running = False
         self.db_worker_running = False
 
@@ -366,7 +374,8 @@ if st.session_state.ar_model_name and st.session_state.ar_model_name != "无可�
 SAMPLE_INTERVAL = 0.2
 BATCH_SIZE = 16
 PLAYBACK_DELAY = 0.1
-ACTION_CLASSES = ["正常行走", "正在跑步", "跌倒检测", "挥手求救", "静止站立", "非法入侵"]
+# ACTION_CLASSES = ["正常行走", "正在跑步", "跌倒检测", "挥手求救", "静止站立", "非法入侵"]
+ACTION_CLASSES = []
 
 # === 新增：数据库写入线程 ===
 def db_writer_worker():
@@ -374,7 +383,7 @@ def db_writer_worker():
     print(">>> 💾 数据库写入线程已启动 <<<")
     global ctx
     
-    conn = sqlite3.connect(config.TEST_DATABASE, check_same_thread=False)
+    conn = sqlite3.connect(config.VIDEO_RECOGNITION_DATABASE, check_same_thread=False)
     cursor = conn.cursor()
     
     try:
@@ -387,10 +396,10 @@ def db_writer_worker():
                 height INTEGER,
                 width INTEGER,
                 category TEXT,
-                bbox_x1 REAL,
-                bbox_y1 REAL,
-                bbox_x2 REAL,
-                bbox_y2 REAL,
+                bbox_x REAL,
+                bbox_y REAL,
+                bbox_w REAL,
+                bbox_h REAL,
                 confidence REAL,
                 timestamp TEXT 
             )
@@ -406,7 +415,7 @@ def db_writer_worker():
             data_batch = ctx.db_queue.get()
             # 2. 批量插入
             cursor.executemany('''
-                INSERT INTO recognition_results (user_name, filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2, confidence, timestamp)
+                INSERT INTO recognition_results (user_name, filename, height, width, category, bbox_x, bbox_y, bbox_w, bbox_h, confidence, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', data_batch)
             conn.commit()
@@ -465,13 +474,16 @@ def complex_worker():
                 conf_val = online_video_data.ar_conf.__str__()
                 
                 # === 生成统一的 DB 数据 (关键修改) ===
-                unified_db_data = online_video_data.get_unified_db_data(ACTION_CLASSES, username)
+                unified_db_data = online_video_data.get_unified_db_data(ACTION_CLASSES, username, ctx)
                 
                 # === 推送至 DB 队列 ===
                 if unified_db_data and not ctx.db_queue.full():
                     ctx.db_queue.put(unified_db_data)
 
             else:
+                unified_db_data = online_video_data.get_unified_db_data(
+                    ACTION_CLASSES, username, ctx
+                )
                 action = "无目标"
                 conf_val = "0.0"
 
@@ -508,7 +520,9 @@ def video_frame_callback(frame):
     # 采集当前时间 (datetime对象)
     current_dt = datetime.datetime.now()
     img = frame.to_ndarray(format="bgr24")
-    
+    target_w, target_h = 640, 480
+    if img.shape[1] != target_w or img.shape[0] != target_h:
+        img = cv2.resize(img, (target_w, target_h))
     current_time_float = current_dt.timestamp() 
     
     with ctx.lock:
@@ -528,8 +542,17 @@ def mock_detect(buffer_with_ts) -> tuple[list, list]:
     
     if od_model is None:
         return frames, []
+    
+    try:
+        result = od_model.track(frames, persist=True, **pred_args)
+    except cv2.error as e:
+        logger.error(f"opencv错误: {e}")
+        logger.info("⚠️ 检测到视频流分辨率变化，正在重置跟踪器状态...")
+        result = od_model.track(frames, persist=False, **pred_args)
+    except Exception as e:
+        logger.error(f"模型预测错误: {e}")
+        return frames, []
         
-    result = od_model.track(frames, persist=True, **pred_args)
     processed_frames = []
     for res in result:
         processed_frames.append(res.plot())
@@ -564,6 +587,11 @@ with c2:
 st.markdown("#### 📜 行为识别结果(实时更新)")
 hist_ph = st.empty()
 error_ph = st.empty()
+
+# === 实时检测结果 ===
+st.divider()
+st.markdown("#### 📊 实时检测统计 (滑动窗口)")
+chart_ph = st.empty()
 
 # ==========================================
 # 7. 主循环
@@ -630,6 +658,27 @@ if ctx.worker_running:
                         history_text += f"- {h}\n"
                     if history_text:
                         hist_ph.markdown(history_text)
+                    
+                    ### 实时检测结果更新 ###
+                    if ctx.detection_window:
+                        # 转换数据并绘图
+                        # 注意：为了性能，这里最好把 list() 放在外面或者不加锁（如果对即时性要求不苛刻）
+                        # 但为了安全，list(deque) 是推荐的操作
+                        window_data = list(ctx.detection_window)
+                        
+                        df_stats = pd.DataFrame(window_data, columns=["类别"])
+                        chart_data = df_stats["类别"].value_counts().reset_index()
+                        chart_data.columns = ["类别", "统计数量"]
+                        
+                        chart_ph.bar_chart(
+                            chart_data, 
+                            x="类别", 
+                            y="统计数量",
+                            color="#FF4B4B"
+                        )
+                    else:
+                        chart_ph.info("等待检测数据...")
+
                     time.sleep(PLAYBACK_DELAY)
                 
                 buffer = []
