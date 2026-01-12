@@ -22,7 +22,7 @@ def get_res_to_sqlite(
     
 
         cursor.execute('''
-                CREATE TABLE IF NOT EXISTS annotations (
+                CREATE TABLE IF NOT EXISTS recognition_results (
                     img_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT NOT NULL,
                     height INTEGER NOT NULL,
@@ -31,7 +31,9 @@ def get_res_to_sqlite(
                     bbox_x1 REAL NOT NULL,
                     bbox_y1 REAL NOT NULL,
                     bbox_x2 REAL NOT NULL,
-                    bbox_y2 REAL NOT NULL
+                    bbox_y2 REAL NOT NULL,
+                    confidence REAL,
+                    timestamp TEXT
                 )
             ''')
 
@@ -42,14 +44,16 @@ def get_res_to_sqlite(
         for i in range(len(result.raw_anno)):
             # img_id += 1
             file_name = f"{video_name}_{i*3/16:.3f}.png"
+            timestamp = i*3/16
             for j in result.raw_anno[i]:
                 bbox = j["bbox"]
+                # print("============" + j["conf"] + "===============")
                 bbox = [float(bbox[0]), float(bbox[1]), float(bbox[2]-bbox[0]), float(bbox[3]-bbox[1])]
-                data_to_insert.append((file_name, height, width, j["cls"], bbox[0], bbox[1], bbox[2], bbox[3]))
+                data_to_insert.append((file_name, height, width, j["cls"], bbox[0], bbox[1], bbox[2], bbox[3], float(j["conf"]), timestamp))
         
         cursor.executemany('''
-            INSERT INTO annotations (filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO recognition_results (filename, height, width, category, bbox_x1, bbox_y1, bbox_x2, bbox_y2, confidence, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', data_to_insert)
 
         conn.commit()

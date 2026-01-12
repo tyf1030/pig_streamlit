@@ -6,6 +6,7 @@ import tempfile
 import shutil
 import config  # 你的全局配置文件
 import logging
+import pandas as pd
 
 # === 1. 导入工具库 (保留原有逻辑) ===
 try:
@@ -85,7 +86,8 @@ def init_session_state():
         'od_iou': 0.7,
         'last_saved_od_model': None,  # 记录上次保存的 OD 模型文件名
         'last_saved_ar_model': None,  # 记录上次保存的 AR 模型标识
-        'current_file_fingerprint': None # 当前视频文件的指纹
+        'current_file_fingerprint': None, # 当前视频文件的指纹
+        'json_result_path': None,     # 存储 JSON 推理结果路径'
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -114,7 +116,7 @@ def save_uploaded_ar_model(uploaded_files):
     pth_file = next((f for f in uploaded_files if f.name.endswith('.pth')), None)
     
     if not py_file or not pth_file:
-        loffer.error("上传文件格式错误") 
+        logger.error("上传文件格式错误") 
         st.error("❌ 必须要同时上传 .py 和 .pth 文件")
         return
 
@@ -141,11 +143,12 @@ def save_uploaded_ar_model(uploaded_files):
     st.toast(f"✅ AR 模型已保存至: {model_dir}")
 
 # --- 核心任务逻辑 ---
-def run_analysis_pipeline(conf, iou, device):
+def run_analysis_pipeline(conf, iou, device, chart_placeholder=None):
     """执行完整的视频分析流程"""
     status = st.empty()
     bar = st.progress(0)
     video_name = os.path.basename(st.session_state.video_path)
+    current_stats = {}
     logger.info(f"启动分析任务: 视频={video_name}, OD模型={st.session_state.od_model_name}, AR模型={st.session_state.ar_model_name}, 设备={device}")
     
     try:
@@ -231,6 +234,17 @@ def run_analysis_pipeline(conf, iou, device):
             
             if segment_count % 5 == 0:
                 logger.info(f"已处理片段: {segment_count}")
+
+            if video_data.anno:
+                for frame_anno in video_data.anno:
+                    for target in frame_anno:
+                        label = target["cls"]
+                        current_stats[label] = current_stats.get(label, 0) + 1
+            
+            if chart_placeholder is not None and current_stats:
+                df_stats = pd.DataFrame(list(current_stats.items()), columns=["类别", "累计帧数"])
+                chart_placeholder.bar_chart(df_stats, x="类别", y="累计帧数", color="#FF4B4B")
+
 
             segment_count += 1
             if reader.total_frames > 0:
@@ -379,11 +393,12 @@ with col1:
 
         # 处理上传文件逻辑
         if uploaded_file:
-            logger.info(f"上传新视频文件: {uploaded_file.name}, 大小: {uploaded_file.size/1024/1024:.2f}MB")
+            
             file_fingerprint = f"{uploaded_file.name}_{uploaded_file.size}"
             
             # 只有当指纹变化时才处理
             if st.session_state.get('current_file_fingerprint') != file_fingerprint:
+                logger.info(f"上传新视频文件: {uploaded_file.name}, 大小: {uploaded_file.size/1024/1024:.2f}MB")
                 timestamp = int(time.time())
                 raw_name = f"raw_{timestamp}_{uploaded_file.name}"
                 raw_path = os.path.join("temp_uploads", raw_name)
@@ -406,6 +421,7 @@ with col1:
                     st.session_state.processing_result = None
                     st.session_state.output_video_path = None
                     st.session_state.result_dir = None
+                    st.session_state.json_result_path = None
                     
                     progress_toast.toast("✅ 视频预处理完成", icon="✅")
                     logger.info("已处理新视频")
@@ -464,20 +480,7 @@ with col2:
     download_container = st.container()   # 下载按钮区域
 
     # 2. 处理点击事件 (在 status_container 中显示进度)
-    if start_btn:
-        with status_container:
-            logger.info("开始分析")
-            success = run_analysis_pipeline(conf, iou, device)
-            if success and save_db:
-                try:
-                    get_res_to_sqlite(st.session_state.processing_result, config.VIDEO_RECOGNITION_DATABASE)
-                    st.toast("💾 数据库已更新")
-                    logger.info(f"分析结果已存入数据库: {config.VIDEO_RECOGNITION_DATABASE}")
-                except Exception as e:
-                    logger.info(f"数据库错误: {e}")
-                    st.error(f"数据库错误: {e}")
-            if success:
-                st.rerun() # 刷新以显示结果
+    
 
     # 3. 结果显示逻辑 (渲染在顶部的 result_display_container)
     with result_display_container.container():
@@ -512,16 +515,17 @@ with col2:
             
             # 按钮 2: JSON
             if st.session_state.result_dir:
-                json_path = get_coco_annotations(st.session_state.processing_result, st.session_state.result_dir)
-                if os.path.exists(json_path):
-                    with open(json_path, "r") as f:
+                if not st.session_state.json_result_path:
+                    st.session_state.json_result_path = get_coco_annotations(st.session_state.processing_result, st.session_state.result_dir)
+                if os.path.exists(st.session_state.json_result_path):
+                    with open(st.session_state.json_result_path, "r") as f:
                         dc2.download_button(
                             "📋 下载 JSON", 
                             f, 
                             file_name="annotations.json", 
                             mime="application/json",
                             use_container_width=True,
-                            on_click=lambda: logger.info(f"用户下载了分析结果JSON: {json_path}")
+                            on_click=lambda: logger.info(f"用户下载了分析结果JSON: {st.session_state.json_result_path}")
                         )
             
             # 按钮 3: ZIP
@@ -559,3 +563,66 @@ with col2:
             dc1.button("🎥 下载视频", disabled=True, use_container_width=True)
             dc2.button("📋 下载 JSON", disabled=True, use_container_width=True)
             dc3.button("🖼️ 打包图片", disabled=True, use_container_width=True)
+
+
+# ==========================================
+# 底部：可视化统计区域 (先定义布局，确保 chart_ph 存在)
+# ==========================================
+st.divider()
+st.header('📊 识别结果统计')
+
+# 1. 定义占位符 (必须在业务逻辑执行前定义)
+chart_ph = st.empty()
+
+# ==========================================
+# 核心业务逻辑处理 (移动到布局定义之后)
+# ==========================================
+# 处理点击事件：在 status_container 中显示进度
+# 注意：我们将这部分逻辑从 col2 移到了这里，以便能访问到 chart_ph
+if start_btn:
+    # 虽然逻辑在底部，但我们可以通过 container 指定显示位置
+    # 这里的 status_container 是在 col2 中定义的，所以进度条依然会显示在右侧上方
+    with status_container:
+        logger.info("开始分析")
+        # 现在 chart_ph 已经定义了，可以安全传入
+        success = run_analysis_pipeline(conf, iou, device, chart_placeholder=chart_ph)
+        
+        if success and save_db:
+            try:
+                get_res_to_sqlite(st.session_state.processing_result, config.VIDEO_RECOGNITION_DATABASE)
+                st.toast("💾 数据库已更新")
+                logger.info(f"分析结果已存入数据库: {config.VIDEO_RECOGNITION_DATABASE}")
+            except Exception as e:
+                logger.info(f"数据库错误: {e}")
+                st.error(f"数据库错误: {e}")
+        
+        if success:
+            st.rerun() # 刷新页面以显示最终结果
+
+# ==========================================
+# 持久化显示逻辑 (页面刷新后保持图表显示)
+# ==========================================
+# 修正了你代码中的拼写错误
+if st.session_state.processing_result:
+    total_stats = {} # 修正变量名 total_statics -> total_stats
+    
+    # 数据提取
+    if st.session_state.processing_result.raw_anno:
+        for frame_anno in st.session_state.processing_result.raw_anno: # 修正 fram_anno -> frame_anno
+            for anno in frame_anno:
+                label = anno['cls'] # 修正 labe1 -> label
+                total_stats[label] = total_stats.get(label, 0) + 1 # 修正 totcall_statics -> total_stats
+    
+    # 绘图
+    if total_stats:
+        df_final = pd.DataFrame(list(total_stats.items()), columns=['类别', '累计帧数']) # 修正列名一致性
+        # 使用自定义颜色
+        chart_ph.bar_chart(df_final, x="类别", y="累计帧数", color="#FF4B4B")
+    else:
+        chart_ph.info("暂无数据或者视频中未检测到目标对象")
+else:
+    # 初始状态提示
+    # 只有当没有正在进行分析时才显示"等待分析数据"
+    # (如果正在运行 pipeline，pipeline 内部会更新 chart_ph)
+    if not start_btn: 
+        chart_ph.info("等待分析数据...")

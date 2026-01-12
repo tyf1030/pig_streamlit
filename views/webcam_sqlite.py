@@ -23,7 +23,9 @@ from backend.inference import inference_recognizer_simplified
 import logging
 # ==========================================
 # 0. 辅助工具函数
-# ==========================================
+# ==========================================s
+
+logger = logging.getLogger("Views.StreamAnalyzer")
 def extract_yolo_data_to_cpu(yolo_results: list) -> list:
     """
     将 YOLO 结果转换为 CPU 上的 numpy 字典列表，便于跨线程传递。

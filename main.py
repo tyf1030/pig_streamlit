@@ -1,7 +1,9 @@
 # main.py
 import streamlit as st
 import utils.db_manager as db
-
+import logging
+import os
+from logging.handlers import RotatingFileHandler
 
 class UserContextFilter(logging.Filter):
     """
