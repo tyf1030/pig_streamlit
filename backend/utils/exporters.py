@@ -43,14 +43,17 @@ def get_res_to_sqlite(
         width, height = result.images[0].shape[1], result.images[0].shape[0]
         video_name = result.video_name
         data_to_insert = []
+        current_time = datetime.datetime.now()
         for i in range(len(result.raw_anno)):
             # img_id += 1
             file_name = f"{video_name}_{i*3/16:.3f}.png"
-            timestamp = i*3/16
+            time_diff = datetime.timedelta(seconds=i*3/16)
+            timestamp = (current_time + time_diff).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
             for j in result.raw_anno[i]:
                 bbox = j["bbox"]
                 # print("============" + j["conf"] + "===============")
-                bbox = [float(bbox[2]+bbox[0]), float(bbox[3]+bbox[1]), float(bbox[2]-bbox[0]), float(bbox[3]-bbox[1])]
+                bbox = [float((bbox[2]+bbox[0])*0.5), float((bbox[3]+bbox[1])*0.5), float(bbox[2]-bbox[0]), float(bbox[3]-bbox[1])]
                 data_to_insert.append((file_name, user_name, height, width, j["cls"], bbox[0], bbox[1], bbox[2], bbox[3], float(j["conf"]), timestamp))
         
         cursor.executemany('''

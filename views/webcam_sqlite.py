@@ -196,7 +196,7 @@ class OnlineVideoData:
                 db_rows.append((
                     username,
                     "webcam_stream", img_h, img_w, category,
-                    float(box[0]+box[2]), float(box[1]+box[3]), float(box[2]-box[0]), float(box[3]-box[1]),
+                    float((box[0]+box[2])*0.5), float((box[1]+box[3])*0.5), float(box[2]-box[0]), float(box[3]-box[1]),
                     conf, ts_str
                 ))
 

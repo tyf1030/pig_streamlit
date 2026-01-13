@@ -102,6 +102,7 @@ else:
     nav_structure = [
         st.Page("views/new_app.py", title="上传视频", icon="📸", default=True),
         st.Page("views/webcam_sqlite.py", title="SQLite", icon="🛡️"),
+        st.Page("views/dashboard.py", title="Dashboard", icon="📊"),
         pg_logout,
 
     ]
